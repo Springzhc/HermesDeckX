@@ -2,6 +2,102 @@
 set -e
 
 # ==============================================================================
+# Environment hardening — auto-detect China network & provide fallbacks
+# ==============================================================================
+# Added by opencode (ollama-bot baseline hardening, 2026-06). Safe to delete
+# the whole block if your environment doesn't need it. Never aborts the install.
+#   - Detects mainland-China network (2x ping to go.dev / proxy.golang.org)
+#   - Switches GOPROXY / GOSUMDB / GO_INSTALL_MIRROR to domestic mirrors
+#   - Prints a hint when Alpine `apk add go` is too old for Go 1.24+
+#   - Prints a fallback hint when both curl and wget are missing
+#   - Reaps background jobs on EXIT to prevent zombie accumulation
+# Disable with:  HDX_SKIP_CN_DETECT=1 bash install.sh
+# ==============================================================================
+
+# Enable job control so `wait` works inside the trap (bash non-interactive)
+set -m
+# Reap background jobs on exit to prevent zombie accumulation
+trap 'wait 2>/dev/null || true' EXIT
+
+detect_and_setup_mirrors() {
+    # Define local color fallbacks in case the global colors aren't set yet
+    local YELLOW="${YELLOW:-\033[1;33m}"
+    local CYAN="${CYAN:-\033[0;36m}"
+    local NC="${NC:-\033[0m}"
+
+    local is_cn=0
+
+    # Skip detection if user explicitly disabled it
+    if [ "${HDX_SKIP_CN_DETECT:-0}" != "1" ]; then
+        local probe_hosts=("go.dev" "proxy.golang.org")
+        local probe_failures=0
+
+        for host in "${probe_hosts[@]}"; do
+            # Probe each host twice with a 3s timeout per attempt.
+            # Two consecutive failures count as one blocked host.
+            local host_fails=0
+            if ! timeout 3 ping -c 1 -W 2 "$host" >/dev/null 2>&1; then
+                if ! timeout 3 ping -c 1 -W 2 "$host" >/dev/null 2>&1; then
+                    host_fails=1
+                fi
+            fi
+            if [ "$host_fails" -eq 1 ]; then
+                probe_failures=$((probe_failures + 1))
+            fi
+        done
+        # 2 of 2 hosts unreachable → assume mainland China
+        if [ "$probe_failures" -ge 2 ]; then
+            is_cn=1
+        fi
+    fi
+
+    if [ "$is_cn" -eq 1 ]; then
+        echo -e "${YELLOW}⚠ Detected mainland-China network, switching to domestic mirrors${NC}"
+        export GOPROXY="${GOPROXY:-https://goproxy.cn,direct}"
+        export GOSUMDB="${GOSUMDB:-sum.golang.google.cn}"
+        export GO_INSTALL_MIRROR="${GO_INSTALL_MIRROR:-https://mirrors.aliyun.com/golang}"
+        echo -e "${CYAN}  GOPROXY=${GOPROXY}${NC}"
+        echo -e "${CYAN}  GOSUMDB=${GOSUMDB}${NC}"
+        echo -e "${CYAN}  GO_INSTALL_MIRROR=${GO_INSTALL_MIRROR}${NC}"
+    fi
+
+    # Detect package manager (informational only)
+    local pkg_mgr="unknown"
+    if   command -v apk     >/dev/null 2>&1; then pkg_mgr="apk"
+    elif command -v apt-get >/dev/null 2>&1; then pkg_mgr="apt"
+    elif command -v dnf     >/dev/null 2>&1; then pkg_mgr="dnf"
+    elif command -v yum     >/dev/null 2>&1; then pkg_mgr="yum"
+    elif command -v brew    >/dev/null 2>&1; then pkg_mgr="brew"
+    fi
+    echo -e "${CYAN}  Package manager: ${pkg_mgr}${NC}"
+
+    # Hint: Alpine's `apk add go` is often older than 1.24 → use tarball
+    if [ "$pkg_mgr" = "apk" ]; then
+        local arch
+        arch="$(uname -m)"
+        case "$arch" in
+            x86_64)  arch="amd64" ;;
+            aarch64) arch="arm64" ;;
+        esac
+        if [ -n "$arch" ]; then
+            echo -e "${YELLOW}ℹ Alpine apk's go may be < 1.24; prefer the official tarball:${NC}"
+            echo -e "    ${GO_INSTALL_MIRROR:-https://go.dev/dl}/go1.24.4.linux-${arch}.tar.gz"
+        fi
+    fi
+
+    # Hint: fallback when both curl and wget are missing
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        echo -e "${YELLOW}⚠ Both curl and wget are missing; alternatives:${NC}"
+        echo -e "    1) ${CYAN}busybox wget${NC} (bundled with Alpine base image)"
+        echo -e "    2) ${CYAN}python3 -c 'import urllib.request; urllib.request.urlretrieve(URL, FILE)'${NC}"
+        echo -e "    3) Reinstall: ${CYAN}apk add curl wget${NC} or ${CYAN}apt install -y curl wget${NC}"
+    fi
+}
+
+# Always run hardening; never let it abort the install
+detect_and_setup_mirrors || true
+
+# ==============================================================================
 # HermesDeckX - One-Click Launcher
 # ==============================================================================
 
